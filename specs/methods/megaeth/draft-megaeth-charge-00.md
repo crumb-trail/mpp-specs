@@ -513,6 +513,9 @@ Before broadcasting, servers MUST verify:
 
 Upon successful settlement, servers MUST return a
 `Payment-Receipt` header per {{I-D.httpauth-payment}}.
+Servers MUST NOT include a `Payment-Receipt` header on
+error responses; failures are communicated via HTTP
+status codes and Problem Details.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -613,6 +616,22 @@ the "HTTP Payment Intents" registry established by
 | `charge` | `megaeth` | One-time ERC-20 transfer | This document |
 
 --- back
+
+# ABNF Collected
+
+~~~ abnf
+megaeth-charge-challenge = "Payment" 1*SP
+  "id=" quoted-string ","
+  "realm=" quoted-string ","
+  "method=" DQUOTE "megaeth" DQUOTE ","
+  "intent=" DQUOTE "charge" DQUOTE ","
+  "request=" base64url-nopad
+
+megaeth-charge-credential = "Payment" 1*SP base64url-nopad
+
+; Base64url encoding without padding per RFC 4648 Section 5
+base64url-nopad = 1*( ALPHA / DIGIT / "-" / "_" )
+~~~
 
 # Known Tokens
 
