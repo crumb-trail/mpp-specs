@@ -489,10 +489,7 @@ available. Servers MAY fall back to standard
 
 MegaETH's 10ms block times and sub-second finality
 enable settlement in under 50ms end-to-end (signature
-verification + transaction submission + receipt). This
-is measured against Base mainnet where equivalent
-settlement takes 500-3000ms depending on optimization
-level.
+verification + transaction submission + receipt).
 
 ## Transaction Verification
 
