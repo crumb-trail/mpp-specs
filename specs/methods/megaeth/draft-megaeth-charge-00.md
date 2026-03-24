@@ -502,6 +502,8 @@ the payload contains only the transaction hash:
 
 - Cannot be used with `feePayer: true`
 - Server cannot modify the transaction
+- Weaker challenge binding than Permit2/EIP-3009
+  payloads (see {{hash-binding}})
 
 # Settlement Procedure
 
@@ -582,6 +584,7 @@ status codes and Problem Details.
 | Field | Type | Description |
 |-------|------|-------------|
 | `method` | string | `"megaeth"` |
+| `challengeId` | string | The challenge `id` from `WWW-Authenticate` |
 | `reference` | string | Transaction hash |
 | `status` | string | `"success"` |
 | `timestamp` | string | {{RFC3339}} settlement time |
@@ -640,6 +643,29 @@ ID in the EIP-712 domain separator. Signatures for
 MegaETH mainnet (4326) cannot be replayed on testnet
 (6343) or other EVM chains.
 
+## Hash Payload Challenge Binding {#hash-binding}
+
+The `type="hash"` credential has weaker challenge-specific
+binding than Permit2 or EIP-3009 payloads. A hash
+credential proves that a payment matching the challenge
+terms was made on-chain, but the on-chain transaction
+itself does not carry a challenge-specific marker.
+
+If two valid challenges exist with identical payment
+terms (same amount, recipient, and token), a single
+on-chain transaction could satisfy either challenge.
+The first credential presentation wins, as servers MUST
+track consumed transaction hashes and reject duplicates.
+
+Permit2 and EIP-3009 payloads do not have this weakness
+because each signature is bound to a unique nonce that
+is consumed on-chain.
+
+Servers requiring strong challenge-specific binding
+SHOULD prefer Permit2 or EIP-3009 payloads. Servers
+accepting hash payloads SHOULD avoid issuing concurrent
+challenges with identical payment terms.
+
 ## Amount Verification
 
 Clients MUST verify before signing:
@@ -658,12 +684,19 @@ payment verification.
 ## Fee Payer Risks
 
 Servers acting as fee payers accept the risk of paying
-gas for transactions that may fail on-chain. Servers
-SHOULD:
+gas for transactions that may fail on-chain.
 
-- Simulate transactions via `eth_call` before submission
+When `feePayer` is `true`, servers MUST simulate
+transactions via `eth_call` before submission to catch
+failures without spending gas. When `feePayer` is
+`false`, servers SHOULD simulate before broadcasting.
+
+Servers SHOULD also:
+
 - Implement rate limiting per client address
 - Monitor hot wallet balance
+- Require client authentication before accepting
+  fee-sponsored transactions
 
 On MegaETH, gas costs are negligible, limiting the
 financial impact of this risk.
@@ -798,10 +831,11 @@ Decoded receipt:
 
 ~~~json
 {
-  "status": "success",
   "method": "megaeth",
-  "timestamp": "2026-03-20T12:00:01Z",
-  "reference": "0xabcdef1234567890..."
+  "challengeId": "mE9xPqWvT2nJrHsY4aDfEb",
+  "reference": "0xabcdef1234567890...",
+  "status": "success",
+  "timestamp": "2026-03-20T12:00:01Z"
 }
 ~~~
 
