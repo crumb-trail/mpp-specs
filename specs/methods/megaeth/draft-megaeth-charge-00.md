@@ -185,7 +185,7 @@ in `WWW-Authenticate` per {{I-D.httpauth-payment}}.
 | `chainId` | number | OPTIONAL | Chain ID (default: 4326) |
 | `testnet` | boolean | OPTIONAL | If true, use testnet (chain 6343) |
 | `assetTransferMethod` | string | OPTIONAL | `"permit2"` (default) or `"eip3009"` |
-| `feePayer` | boolean | OPTIONAL | If true, server pays gas (default: true) |
+| `feePayer` | boolean | OPTIONAL | If true, server pays gas (default: false) |
 | `permit2Address` | string | OPTIONAL | Permit2 contract (default: canonical) |
 | `eip712Domain` | object | OPTIONAL | EIP-712 domain override for EIP-3009 tokens using a forwarder |
 
@@ -197,8 +197,8 @@ to 4326 (MegaETH mainnet).
 
 | Network | Chain ID | RPC |
 |---------|----------|-----|
-| Mainnet | 4326 | `https://rpc.megaeth.com` |
-| Testnet | 6343 | `https://rpc-testnet.megaeth.com` |
+| Mainnet | 4326 | `https://mainnet.megaeth.com/rpc` |
+| Testnet | 6343 | `https://carrot.megaeth.com/rpc` |
 
 ### Asset Transfer Methods
 
@@ -247,7 +247,7 @@ verifyingContract from the token itself).
   "methodDetails": {
     "chainId": 4326,
     "assetTransferMethod": "permit2",
-    "feePayer": true
+    "feePayer": false
   }
 }
 ~~~
@@ -265,7 +265,7 @@ This requests a transfer of 1.0 USDm (10^18 base units,
   "methodDetails": {
     "chainId": 4326,
     "assetTransferMethod": "eip3009",
-    "feePayer": true,
+    "feePayer": false,
     "eip712Domain": {
       "name": "USDm Forwarder",
       "version": "1",
@@ -407,9 +407,9 @@ The `authorization` object:
 MegaETH transaction fees are negligible (<$0.001 per
 transaction). Servers SHOULD sponsor gas by default.
 
-## Server-Paid Fees (Default)
+## Server-Paid Fees
 
-When `feePayer` is `true` or omitted:
+When `feePayer` is `true`:
 
 1. The client signs only the payment authorization
    (Permit2 or EIP-3009). No transaction is signed by
@@ -421,9 +421,9 @@ When `feePayer` is `true` or omitted:
 This is the expected flow. The client never interacts
 with the chain directly.
 
-## Client-Paid Fees
+## Client-Paid Fees (Default)
 
-When `feePayer` is `false`, the client MAY submit the
+When `feePayer` is `false` or omitted, the client MAY submit the
 transaction directly to the MegaETH network and provide
 a hash credential (see {{hash-payload}}).
 
@@ -657,7 +657,7 @@ Decoded `request`:
   "methodDetails": {
     "chainId": 4326,
     "assetTransferMethod": "permit2",
-    "feePayer": true
+    "feePayer": false
   }
 }
 ~~~
