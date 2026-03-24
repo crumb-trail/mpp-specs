@@ -21,6 +21,7 @@ normative:
   RFC8174:
   RFC8259:
   RFC8785:
+  RFC9457:
   I-D.httpauth-payment:
     title: "The 'Payment' HTTP Authentication Scheme"
     target: https://datatracker.ietf.org/doc/draft-ietf-httpauth-payment/
@@ -188,6 +189,7 @@ in `WWW-Authenticate` per {{I-D.httpauth-payment}}.
 | `feePayer` | boolean | OPTIONAL | If true, server pays gas (default: false) |
 | `permit2Address` | string | OPTIONAL | Permit2 contract (default: canonical) |
 | `eip712Domain` | object | OPTIONAL | EIP-712 domain override for EIP-3009 tokens using a forwarder |
+| `splits` | array | OPTIONAL | Additional payment splits (max 8) |
 
 ### Chain ID Resolution
 
@@ -253,7 +255,7 @@ verifyingContract from the token itself).
 ~~~
 
 This requests a transfer of 1.0 USDm (10^18 base units,
-18 decimals) using Permit2 with server-paid gas.
+18 decimals) using Permit2 with client-paid gas.
 
 **Example (EIP-3009 with forwarder):**
 
@@ -274,6 +276,65 @@ This requests a transfer of 1.0 USDm (10^18 base units,
   }
 }
 ~~~
+
+### Payment Splits
+
+The `splits` field allows a single payment to be
+distributed across multiple recipients. Each entry is
+a JSON object with the following fields:
+
+- `recipient` (REQUIRED): ERC-20 address of the split
+  recipient.
+- `amount` (REQUIRED): Amount in the same base units as
+  the primary `amount`.
+- `memo` (OPTIONAL): Human-readable label for this
+  split (e.g., "platform fee", "referral"). MUST NOT
+  exceed 256 characters.
+
+When present, the client MUST include a transfer
+authorization for each split in addition to the primary
+transfer. All splits use the same token as the primary
+payment (`currency`).
+
+The top-level `amount` is the total the client pays.
+The sum of all split amounts MUST NOT exceed `amount`.
+The primary `recipient` receives `amount` minus the sum
+of all split amounts; this remainder MUST be greater
+than zero. Servers MUST reject challenges where splits
+consume the entire amount. Servers MUST verify each
+split transfer on-chain during credential verification.
+
+At most 8 splits MAY be specified. This mechanism
+enables platform fees, revenue sharing, referral
+commissions, and fee payer cost recovery without
+additional infrastructure.
+
+**Example (Permit2 with splits):**
+
+~~~json
+{
+  "amount": "1050000000000000000",
+  "currency": "0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7",
+  "recipient": "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00",
+  "description": "Marketplace purchase",
+  "methodDetails": {
+    "chainId": 4326,
+    "assetTransferMethod": "permit2",
+    "feePayer": false,
+    "splits": [
+      {
+        "recipient": "0x8Ba1f109551bD432803012645Ac136ddd64DBA72",
+        "amount": "50000000000000000",
+        "memo": "platform fee"
+      }
+    ]
+  }
+}
+~~~
+
+This requests a total payment of 1.05 USDm. The platform
+receives 0.05 USDm and the primary recipient receives
+1.00 USDm.
 
 # Credential Schema
 
@@ -452,7 +513,9 @@ the payload contains only the transaction hash:
    allowance
 3. Server calls `Permit2.permitWitnessTransferFrom()`
    on-chain via its hot wallet
-4. Server receives transaction receipt
+4. If `splits` are present, server executes additional
+   `permitWitnessTransferFrom()` calls for each split
+5. Server receives transaction receipt(s)
 
 ## EIP-3009 Settlement
 
@@ -461,7 +524,9 @@ the payload contains only the transaction hash:
    signer with sufficient token balance
 3. Server calls `token.transferWithAuthorization()` (or
    the forwarder equivalent) on-chain via its hot wallet
-4. Server receives transaction receipt
+4. If `splits` are present, server executes additional
+   `transferWithAuthorization()` calls for each split
+5. Server receives transaction receipt(s)
 
 ## Hash Settlement
 
@@ -469,7 +534,7 @@ the payload contains only the transaction hash:
 2. Server fetches the transaction receipt from the chain
 3. Server verifies the emitted `Transfer` event logs
    match the challenge parameters (token, from, to,
-   amount)
+   amount) including any `splits`
 
 ## Transaction Submission
 
@@ -522,6 +587,35 @@ status codes and Problem Details.
 | `timestamp` | string | {{RFC3339}} settlement time |
 | `externalId` | string | OPTIONAL. Echoed from request |
 
+# Error Responses
+
+When rejecting a credential, the server MUST return HTTP
+402 (Payment Required) with a fresh
+`WWW-Authenticate: Payment` challenge per
+{{I-D.httpauth-payment}}. The server SHOULD include a
+response body conforming to RFC 9457 {{RFC9457}} Problem
+Details, with `Content-Type: application/problem+json`.
+
+Servers MUST use the standard problem types defined in
+{{I-D.httpauth-payment}}: `malformed-credential`,
+`invalid-challenge`, and `verification-failed`. The
+`detail` field SHOULD contain a human-readable
+description of the specific failure.
+
+All error responses MUST include a fresh challenge in
+`WWW-Authenticate`.
+
+**Example:**
+
+~~~json
+{
+  "type": "https://paymentauth.org/problems/verification-failed",
+  "title": "Transfer Mismatch",
+  "status": 402,
+  "detail": "Transfer amount does not match challenge"
+}
+~~~
+
 # Security Considerations
 
 ## Signature Replay Protection
@@ -554,6 +648,9 @@ Clients MUST verify before signing:
 2. The `recipient` is the expected party
 3. The `currency` is the expected token
 4. The `chainId` matches the expected network
+5. If `splits` are present, they contain expected
+   recipients and amounts — malicious servers could
+   add splits to redirect funds
 
 Clients MUST NOT rely on the `description` field for
 payment verification.
