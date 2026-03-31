@@ -214,7 +214,7 @@ mixed-case encoding but MUST compare addresses by decoded
 | `chainId` | number | REQUIRED | EIP-155 chain ID |
 | `feePayer` | boolean | OPTIONAL | If `true`, server pays gas (default: `false`) |
 | `permit2Address` | string | OPTIONAL | Permit2 contract address (default: canonical address) |
-| `splits` | array | OPTIONAL | Additional payment splits |
+| `splits` | array | OPTIONAL | Additional payment splits (max 10) |
 
 ### Chain Identification
 
@@ -278,7 +278,7 @@ Constraints:
   `amount`. Clients MUST reject any request that violates
   this constraint.
 - If present, `splits` MUST contain at least 1 entry.
-  Servers SHOULD limit splits to 8 entries.
+  Servers SHOULD limit splits to 10 entries.
 - All transfers MUST target the same `currency` token.
 - Address fields are compared by decoded 20-byte value, not
   by string form.
