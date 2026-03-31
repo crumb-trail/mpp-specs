@@ -822,18 +822,24 @@ affect the credential format or verification procedure.
 
 ## Confirmation Requirements
 
-Servers MUST wait for at least one block confirmation before
-returning a receipt. The required confirmation depth is a
-server policy decision and MAY vary based on transaction value
-and chain finality characteristics.
+Servers MUST wait for a successful transaction receipt
+(i.e., the transaction has been included in at least one
+block) before returning a `Payment-Receipt` header.
 
-As a guideline:
+The time between transaction submission and receipt
+availability varies by chain and current network conditions.
+Servers SHOULD NOT assume a fixed confirmation latency.
+Servers MAY use chain-specific RPC optimizations (e.g.,
+WebSocket subscriptions, `realtime_sendRawTransaction`) to
+minimize wait time.
 
-| Chain Property | Recommended Confirmations |
-|---------------|--------------------------|
-| Sub-second finality (MegaETH, Sei) | 1 block |
-| L2 rollups (Optimism, Base, Arbitrum) | 1 block |
-| Ethereum L1 | 1-12 blocks (value-dependent) |
+This specification does not prescribe a required confirmation
+depth beyond the initial receipt. Finality semantics vary
+across chains — some offer single-slot finality, while others
+(including L2 rollups) settle to a separate layer for
+stronger guarantees. The appropriate confirmation depth for a
+given transaction is a server policy decision outside the
+scope of this specification.
 
 ## Receipt Generation
 
