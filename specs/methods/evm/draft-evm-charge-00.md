@@ -72,13 +72,14 @@ method in the Payment HTTP Authentication Scheme
 exchange one-time ERC-20 token transfers on any EVM-compatible
 blockchain.
 
-Three credential types are supported: `type="transaction"`, where
-the client sends a signed ERC-20 transfer transaction for the
-server to broadcast; `type="permit2"`, where the client signs an
-off-chain Permit2 authorization and the server submits the
-transfer; and `type="hash"`, where the client broadcasts the
-transaction itself and presents the on-chain transaction hash for
-server verification.
+Two credential types are supported: `type="permit2"`
+(RECOMMENDED), where the client signs an off-chain Permit2
+authorization and the server submits the transfer; and
+`type="transaction"`, where the client signs and the server
+broadcasts a standard ERC-20 transfer transaction.
+
+This specification covers ERC-20 token transfers only. Native
+token transfers (ETH, etc.) are out of scope.
 
 --- middle
 
@@ -105,17 +106,39 @@ procedures.
 ## Design Rationale
 
 Prior drafts proposed separate payment methods for individual EVM
-chains (`megaeth`, `sei`, etc.). However, the control flow, data
-structures, and verification logic are identical across these
-chains — the only differences are chain ID, block time, and
-optional RPC extensions. A unified `evm` method avoids
-fragmenting the registry while still allowing chain-specific
-optimizations through `methodDetails`.
+chains. However, the control flow, data structures, and
+verification logic are identical across these chains — the only
+differences are chain ID and optional RPC extensions. A unified
+`evm` method avoids fragmenting the registry while still allowing
+chain-specific optimizations at the implementation level.
+
+## Credential Types
+
+This specification defines two credential types:
+
+- **`type="permit2"` (RECOMMENDED)**: The client signs an
+  off-chain EIP-712 Permit2 authorization. The server constructs
+  and submits the on-chain transaction. This is the preferred
+  flow because:
+
+  - The client never interacts with the chain directly
+  - The server naturally sponsors gas (fee payer)
+  - Split payments are atomic via batch transfers
+  - No nonce management burden on the client
+
+- **`type="transaction"`**: The client signs a complete ERC-20
+  `transfer` transaction. The server broadcasts it. This is the
+  compatible fallback for chains where Permit2 is not deployed
+  or clients that prefer direct transaction signing.
+
+Servers that support Permit2 SHOULD advertise it as the preferred
+credential type. Clients SHOULD prefer `type="permit2"` when
+available.
 
 ## Charge Flow
 
-The following diagram illustrates the default charge flow using
-a signed transaction credential:
+The following diagram illustrates the recommended charge flow
+using a Permit2 credential:
 
 ~~~
 Client                  Server               EVM Chain
@@ -127,14 +150,17 @@ Client                  Server               EVM Chain
   |     intent="charge"    |                      |
   |<-----------------------|                      |
   |                        |                      |
-  | (3) Sign transfer      |                      |
+  | (3) Sign EIP-712       |                      |
+  |     Permit2 authz      |                      |
   |                        |                      |
   | (4) Authorization:     |                      |
   |     Payment <cred>     |                      |
   |----------------------->|                      |
-  |                        | (5) Broadcast tx     |
+  |                        | (5) Submit permit-   |
+  |                        |  [Batch]Witness-     |
+  |                        |  TransferFrom()      |
   |                        |--------------------->|
-  |                        | (6) Confirmation     |
+  |                        | (6) Receipt          |
   |                        |<---------------------|
   | (7) 200 OK + Receipt   |                      |
   |<-----------------------|                      |
@@ -164,7 +190,8 @@ Permit2
   deployed at the canonical address
   `0x000000000022D473030F116dDEE9F6B43aC78BA3` on all
   supported chains. Enables off-chain signed approvals for
-  any ERC-20 token via `PermitWitnessTransferFrom`.
+  any ERC-20 token via `PermitWitnessTransferFrom` and
+  `PermitBatchWitnessTransferFrom`.
 
 EIP-712
 : A standard for typed structured data hashing and signing
@@ -176,11 +203,6 @@ Base Units
   the token's decimal precision. For example, USDC (6
   decimals) uses 1,000,000 base units per 1 USDC; USDm
   (18 decimals) uses 10^18 base units per 1 USDm.
-
-Fee Payer
-: An account that pays transaction gas fees on behalf of
-  the client. On low-fee chains, servers typically sponsor
-  gas to simplify the client experience.
 
 # Request Schema
 
@@ -212,53 +234,44 @@ mixed-case encoding but MUST compare addresses by decoded
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `chainId` | number | REQUIRED | EIP-155 chain ID |
-| `feePayer` | boolean | OPTIONAL | If `true`, server pays gas (default: `false`) |
 | `permit2Address` | string | OPTIONAL | Permit2 contract address (default: canonical address) |
+| `credentialTypes` | array | OPTIONAL | Ordered list of accepted credential types |
 | `splits` | array | OPTIONAL | Additional payment splits (max 10) |
 
 ### Chain Identification
 
 The `chainId` field is REQUIRED and identifies the target
-blockchain. Clients MUST reject challenges whose `chainId` does
-not match a chain they support. The following table lists
-commonly used EVM chain IDs, though this specification is not
-limited to these chains:
+blockchain using its EIP-155 chain ID. Clients MUST reject
+challenges whose `chainId` does not match a chain they
+support.
 
-| Chain ID | Network | Approx. Block Time |
-|----------|---------|-------------------|
-| 1 | Ethereum Mainnet | ~12s |
-| 10 | Optimism | ~2s |
-| 137 | Polygon | ~2s |
-| 1329 | Sei Mainnet | ~400ms |
-| 4326 | MegaETH Mainnet | ~10ms (mini blocks) |
-| 8453 | Base | ~2s |
-| 42161 | Arbitrum One | ~250ms |
-
-Servers MUST include `chainId`. Clients MUST verify `chainId`
-matches their configured chain before signing any transaction or
-authorization.
+A registry of EVM chain IDs is maintained at
+https://chainlist.org. This specification is not limited to
+any particular set of chains.
 
 ### Credential Type Negotiation
 
-Servers MAY indicate preferred credential types via the
+Servers MAY indicate accepted credential types via the
 `credentialTypes` field in `methodDetails`:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `credentialTypes` | array | OPTIONAL | Ordered list of accepted credential types |
+Valid values: `"permit2"`, `"transaction"`.
 
-Valid values: `"transaction"`, `"permit2"`, `"hash"`.
-
-If omitted, servers MUST accept `"transaction"` and SHOULD
-accept `"hash"`. Support for `"permit2"` is OPTIONAL and
-depends on Permit2 deployment on the target chain. Clients
-SHOULD use the first type in the list that they support.
+If omitted, servers MUST accept `"transaction"`. Servers that
+support Permit2 SHOULD include `"permit2"` as the first entry
+to indicate preference. Clients SHOULD use the first type in
+the list that they support.
 
 ### Payment Splits {#split-payments}
 
 The `splits` field enables a single charge to distribute
 payment across multiple recipients. This is useful for
 platform fees, revenue sharing, and marketplace payouts.
+
+Splits REQUIRE `type="permit2"` credentials. The Permit2
+batch transfer mechanism ensures all transfers (primary +
+splits) execute atomically in a single on-chain transaction.
+Servers MUST reject split requests fulfilled with
+`type="transaction"` credentials.
 
 Each entry in the `splits` array is a JSON object:
 
@@ -298,6 +311,7 @@ present regardless of ordering.
   "description": "Marketplace purchase",
   "methodDetails": {
     "chainId": 1329,
+    "credentialTypes": ["permit2"],
     "splits": [
       {
         "recipient": "0x8Ba1f109551bD432803012645Ac136ddd64DBA72",
@@ -311,26 +325,7 @@ present regardless of ordering.
 
 This requests a total payment of 1.05 USDC. The platform
 receives 0.05 USDC and the primary recipient receives 1.00
-USDC.
-
-### Split Atomicity
-
-Split atomicity depends on the credential type:
-
-- **`type="transaction"`**: Clients MAY batch multiple ERC-20
-  transfers into a single transaction using multicall
-  contracts or smart account batching. When batched, all
-  transfers succeed or fail atomically. When executed as
-  separate transactions, atomicity is not guaranteed.
-
-- **`type="permit2"`**: Splits are atomic. The client signs a
-  single `PermitBatchTransferFrom` message covering the primary
-  transfer and all splits. The server submits one
-  `permitBatchWitnessTransferFrom()` call — all transfers
-  succeed or fail as a single on-chain transaction.
-
-Servers SHOULD simulate the batch via `eth_call` before
-submitting on-chain.
+USDC. Both transfers execute atomically via Permit2 batch.
 
 # Credential Schema
 
@@ -349,68 +344,17 @@ The `source` field, if present, SHOULD use the `did:pkh` method
 with the chain ID from the challenge and the payer's address
 (e.g., `did:pkh:eip155:4326:0x1234...`).
 
-## Transaction Payload (type="transaction") {#transaction-payload}
-
-The default credential type. The client signs a complete ERC-20
-`transfer` transaction targeting the `currency` contract. The
-server broadcasts the transaction to the chain.
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `type` | string | REQUIRED | `"transaction"` |
-| `signature` | string | REQUIRED | Hex-encoded RLP-serialized signed transaction |
-
-The `signature` field contains an EIP-1559 (type 2) transaction,
-RLP-encoded and hex-prefixed with `0x`. The transaction MUST
-call `transfer(address,uint256)` on the ERC-20 token specified
-in the challenge.
-
-When `feePayer` is `false` or omitted, the client MUST sign
-a fully valid transaction including gas parameters. When
-`feePayer` is `true`, the client signs the transaction with
-the server's designated address as `from` for fee purposes.
-See {{fee-payment}} for details.
-
-When `splits` are present, the client MUST include transfer
-instructions for each split. Clients MAY use multicall
-contracts, EIP-7702, or smart account batching to achieve
-atomicity.
-
-**Example:**
-
-~~~json
-{
-  "challenge": {
-    "id": "kM9xPqWvT2nJrHsY4aDfEb",
-    "realm": "api.example.com",
-    "method": "evm",
-    "intent": "charge",
-    "request": "eyJ...",
-    "expires": "2026-04-01T12:05:00Z"
-  },
-  "payload": {
-    "signature": "0x02f8...signed transaction bytes...",
-    "type": "transaction"
-  },
-  "source": "did:pkh:eip155:1329:0x1234567890abcdef1234567890abcdef12345678"
-}
-~~~
-
 ## Permit2 Payload (type="permit2") {#permit2-payload}
 
-The client signs an off-chain EIP-712 Permit2 authorization
-message. The server constructs and submits the on-chain
-transaction. This type requires that the Permit2 contract is
-deployed on the target chain and that the client has an active
-ERC-20 approval to the Permit2 contract.
+The RECOMMENDED credential type. The client signs an off-chain
+EIP-712 Permit2 authorization message. The server constructs
+and submits the on-chain transaction, paying gas from its own
+balance. The client never interacts with the chain directly.
 
-Permit2 supports two transfer modes:
-
-- **Single transfer** (`PermitTransferFrom`): Used when no
-  splits are present. One signature, one transfer.
-- **Batch transfer** (`PermitBatchTransferFrom`): Used when
-  splits are present. One signature covers the primary
-  transfer and all splits atomically.
+This type requires that the Permit2 contract is deployed on
+the target chain and that the client has an active ERC-20
+approval to the Permit2 contract (a one-time operation per
+token per chain).
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -419,38 +363,25 @@ Permit2 supports two transfer modes:
 | `transferDetails` | array | REQUIRED | Array of transfer details |
 | `signature` | string | REQUIRED | EIP-712 signature (`0x`-prefixed) |
 
-### Single Transfer (No Splits)
+### Permit Object
 
-When no splits are present, the `permit` object describes a
-single token permission:
+The `permit` object describes the token permissions:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `permitted` | object | `{ token, amount }` — token address and maximum transfer amount |
+| `permitted` | array | Array of `{ token, amount }` objects. One entry per transfer (primary + each split). |
 | `nonce` | string | Permit2 nonce (stringified integer) |
 | `deadline` | string | Unix timestamp (stringified integer) |
 
-The `transferDetails` array MUST contain exactly one entry:
+The `permitted` array MUST always be an array, even for single
+transfers (length 1). Each entry specifies:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `to` | string | Recipient address |
-| `requestedAmount` | string | Exact transfer amount in base units |
+| `token` | string | ERC-20 token address (MUST match `currency`) |
+| `amount` | string | Maximum transfer amount in base units |
 
-The server calls `permitWitnessTransferFrom()` with these
-parameters.
-
-### Batch Transfer (With Splits) {#batch-transfer}
-
-When splits are present, the `permit` object describes
-multiple token permissions — one for the primary transfer and
-one for each split:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `permitted` | array | Array of `{ token, amount }` objects. Length MUST equal 1 + number of splits. All `token` values MUST be the `currency` address. |
-| `nonce` | string | Permit2 nonce (stringified integer) |
-| `deadline` | string | Unix timestamp (stringified integer) |
+### Transfer Details
 
 The `transferDetails` array MUST have the same length as
 `permitted`. Each entry specifies:
@@ -460,16 +391,24 @@ The `transferDetails` array MUST have the same length as
 | `to` | string | Recipient address |
 | `requestedAmount` | string | Exact transfer amount in base units |
 
-The first entry corresponds to the primary recipient. Subsequent
-entries correspond to split recipients in array order.
+The first entry corresponds to the primary recipient.
+Subsequent entries (if any) correspond to split recipients
+in array order.
 
-The server calls `permitBatchWitnessTransferFrom()` with these
-parameters. This executes all transfers in a single on-chain
-transaction — if any transfer fails, the entire batch reverts.
+### Server Behavior
 
-**Prerequisite:** The client MUST have an active ERC-20
-approval from the `currency` token to the Permit2 contract.
-This is a one-time operation per token per chain.
+For single transfers (no splits, `permitted` length 1), the
+server calls `permitWitnessTransferFrom()`.
+
+For batch transfers (with splits, `permitted` length > 1),
+the server calls `permitBatchWitnessTransferFrom()`. This
+executes all transfers in a single on-chain transaction — if
+any transfer fails, the entire batch reverts.
+
+The server pays gas from its own balance in both cases. This
+is the natural fee sponsorship model for Permit2: the client
+signs only the off-chain authorization and the server handles
+all chain interaction.
 
 ### Example: Single Transfer
 
@@ -486,10 +425,12 @@ This is a one-time operation per token per chain.
   "payload": {
     "type": "permit2",
     "permit": {
-      "permitted": {
-        "token": "0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7",
-        "amount": "1000000000000000000"
-      },
+      "permitted": [
+        {
+          "token": "0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7",
+          "amount": "1000000000000000000"
+        }
+      ],
       "nonce": "1",
       "deadline": "1743523500"
     },
@@ -549,28 +490,36 @@ This is a one-time operation per token per chain.
 }
 ~~~
 
-This example transfers 1.0 USDm to the primary recipient and
-0.05 USDm to the platform — atomically, in a single tx.
-The client signs one EIP-712 message covering both transfers.
+This transfers 1.0 USDm to the primary recipient and 0.05 USDm
+to the platform — atomically, in a single transaction. The
+client signs one EIP-712 message covering both transfers.
 
-## Hash Payload (type="hash") {#hash-payload}
+## Transaction Payload (type="transaction") {#transaction-payload}
 
-When the client has already broadcast the transaction to the
-chain, the payload contains only the transaction hash:
+The compatible fallback. The client signs a complete ERC-20
+`transfer` transaction targeting the `currency` contract. The
+server broadcasts the transaction to the chain. The client
+pays gas.
+
+This type is intended for chains where Permit2 is not deployed
+or clients that prefer direct transaction signing.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | string | REQUIRED | `"hash"` |
-| `hash` | string | REQUIRED | Transaction hash (`0x`-prefixed, 32 bytes hex) |
+| `type` | string | REQUIRED | `"transaction"` |
+| `signature` | string | REQUIRED | Hex-encoded RLP-serialized signed transaction |
 
-**Limitations:**
+The `signature` field contains an EIP-1559 (type 2) transaction,
+RLP-encoded and hex-prefixed with `0x`. The transaction MUST
+call `transfer(address,uint256)` on the ERC-20 token specified
+in the challenge.
 
-- MUST NOT be used when `feePayer` is `true`. Servers MUST
-  reject `type="hash"` credentials when the challenge
-  specifies `feePayer: true`.
-- Server cannot modify or retry the transaction.
-- Weaker challenge binding than other payload types (see
-  {{hash-binding}}).
+The client MUST sign a fully valid transaction including gas
+parameters and pay gas from their own balance.
+
+Splits are NOT supported with `type="transaction"`. Servers
+MUST reject `type="transaction"` credentials when the challenge
+includes `splits`.
 
 **Example:**
 
@@ -585,59 +534,12 @@ chain, the payload contains only the transaction hash:
     "expires": "2026-04-01T12:05:00Z"
   },
   "payload": {
-    "hash": "0x1a2b3c...7890",
-    "type": "hash"
+    "signature": "0x02f8...signed transaction bytes...",
+    "type": "transaction"
   },
-  "source": "did:pkh:eip155:4326:0x1234567890abcdef1234567890abcdef12345678"
+  "source": "did:pkh:eip155:1329:0x1234567890abcdef1234567890abcdef12345678"
 }
 ~~~
-
-# Fee Payment {#fee-payment}
-
-Gas costs vary significantly across EVM chains. On high-fee
-chains (Ethereum L1), fee sponsorship is expensive. On low-fee
-chains (MegaETH, Sei, L2 rollups), gas costs are negligible
-and servers SHOULD sponsor fees by default.
-
-## Server-Paid Fees
-
-When `feePayer` is `true`:
-
-- **For `type="permit2"`:** The client signs only the
-  off-chain Permit2 authorization. The server constructs the
-  on-chain transaction using its own hot wallet and pays gas
-  from its own balance. The client never interacts with the
-  chain directly.
-
-- **For `type="transaction"`:** The client signs a transaction
-  but the server's fee payer account is the `from` address
-  on the transaction itself. Implementations SHOULD prefer
-  `type="permit2"` with `feePayer: true` as it provides a
-  cleaner separation of concerns.
-
-## Client-Paid Fees
-
-When `feePayer` is `false` or omitted, the client constructs
-and signs a complete transaction including gas. The client MAY
-use `type="transaction"` (server broadcasts) or `type="hash"`
-(client broadcasts).
-
-## Server Requirements
-
-When acting as fee payer, servers:
-
-- MUST maintain sufficient native token balance to cover gas
-- MUST verify credential contents before spending gas
-- SHOULD implement rate limiting to mitigate gas exhaustion
-  attacks
-- SHOULD simulate transactions via `eth_call` before broadcast
-
-## Client Requirements
-
-- When `feePayer` is `true`: clients MUST use `type="permit2"`
-  or `type="transaction"` and MUST NOT use `type="hash"`
-- When `feePayer` is `false` or omitted: clients MAY use any
-  supported credential type
 
 # Verification Procedure {#verification}
 
@@ -645,17 +547,49 @@ Upon receiving a request with a credential, the server MUST:
 
 1. Decode the base64url credential and parse the JSON.
 2. Verify that `payload.type` is present and is one of
-   `"transaction"`, `"permit2"`, or `"hash"`.
+   `"permit2"` or `"transaction"`.
 3. Look up the stored challenge using `credential.challenge.id`.
    If no matching challenge is found, reject the request.
 4. Verify that all fields in `credential.challenge` exactly
    match the stored challenge auth-params.
-5. If `payload.type` is `"hash"` and the challenge specifies
-   `feePayer: true`, reject the request.
+5. If the challenge includes `splits` and `payload.type` is
+   `"transaction"`, reject the request.
 6. Proceed with type-specific verification:
-   - For `type="transaction"`: see {{transaction-verification}}.
    - For `type="permit2"`: see {{permit2-verification}}.
-   - For `type="hash"`: see {{hash-verification}}.
+   - For `type="transaction"`: see {{transaction-verification}}.
+
+## Permit2 Verification {#permit2-verification}
+
+Before submitting, servers MUST verify:
+
+1. The EIP-712 signature is valid and recovers to the
+   `source` address
+2. The `deadline` has not passed
+3. The signer has sufficient token balance for the total
+   amount (primary + all splits)
+4. The signer has sufficient Permit2 allowance
+5. `permitted` and `transferDetails` arrays have equal length
+6. Each `permitted[i].token` matches `currency`
+7. `transferDetails[0].to` matches `recipient`
+8. `transferDetails[0].requestedAmount` matches the primary
+   transfer amount (`amount` minus sum of splits, or `amount`
+   if no splits)
+9. For each split at index i (if present),
+   `transferDetails[i+1].to` matches `splits[i].recipient`
+   and `transferDetails[i+1].requestedAmount` matches
+   `splits[i].amount`
+
+After verification:
+
+10. For single transfers (`permitted` length 1): call
+    `Permit2.permitWitnessTransferFrom()`
+11. For batch transfers (`permitted` length > 1): call
+    `Permit2.permitBatchWitnessTransferFrom()`
+12. Verify the transaction receipt indicates success
+13. Verify `Transfer` event logs match all expected transfers
+
+Servers SHOULD simulate the transaction via `eth_call` before
+submitting to detect failures without spending gas.
 
 ## Transaction Verification {#transaction-verification}
 
@@ -672,88 +606,13 @@ Before broadcasting, servers MUST verify:
    (`0xa9059cbb`)
 5. Decode the calldata and verify `recipient` and `amount`
    match the challenge request
-6. If `splits` are present, verify that additional transfer
-   instructions are included for each split entry
-7. Broadcast the transaction via `eth_sendRawTransaction`
-8. Wait for confirmation and fetch the transaction receipt
-9. Verify the receipt `status` is `0x1` (success)
-10. Verify the receipt contains `Transfer` event logs matching
-    the challenge parameters
-
-## Permit2 Verification {#permit2-verification}
-
-Before submitting, servers MUST verify:
-
-1. The EIP-712 signature is valid and recovers to the
-   `source` address
-2. The `deadline` has not passed
-3. The signer has sufficient token balance for the total
-   amount (primary + all splits)
-4. The signer has sufficient Permit2 allowance
-
-For **single transfers** (no splits):
-
-5. `permitted.token` matches `currency`
-6. `permitted.amount` is sufficient for the transfer
-7. `transferDetails[0].to` matches `recipient`
-8. `transferDetails[0].requestedAmount` matches `amount`
-9. Call `Permit2.permitWitnessTransferFrom()`
-
-For **batch transfers** (with splits):
-
-5. Each `permitted[i].token` matches `currency`
-6. `permitted` and `transferDetails` arrays have equal
-   length, equal to 1 + number of splits
-7. `transferDetails[0].to` matches the primary `recipient`
-8. `transferDetails[0].requestedAmount` matches
-   `amount - sum(splits[].amount)`
-9. For each split at index i, `transferDetails[i+1].to`
-   matches `splits[i].recipient` and
-   `transferDetails[i+1].requestedAmount` matches
-   `splits[i].amount`
-10. Call `Permit2.permitBatchWitnessTransferFrom()`
-
-For both modes:
-
-11. Verify the transaction receipt indicates success
-12. Verify `Transfer` event logs match all expected
-    transfers
-
-## Hash Verification {#hash-verification}
-
-For hash credentials, servers MUST:
-
-1. Verify `payload.hash` has not been previously consumed
-   (see {{replay-protection}})
-2. Fetch the transaction receipt via
-   `eth_getTransactionReceipt`
-3. Verify `status` is `0x1` (success)
-4. Verify the receipt contains `Transfer` event log(s):
-   - Log `address` matches `currency`
-   - `to` parameter matches `recipient`
-   - `value` parameter matches `amount` (for the primary
-     transfer: `amount` minus sum of splits if present)
-5. If `splits` are present, verify additional `Transfer`
-   logs for each split entry
-6. Mark the hash as consumed
+6. Broadcast the transaction via `eth_sendRawTransaction`
+7. Wait for confirmation and fetch the transaction receipt
+8. Verify the receipt `status` is `0x1` (success)
+9. Verify the receipt contains a `Transfer` event log
+   matching the challenge parameters
 
 # Settlement Procedure
-
-## Transaction Settlement
-
-~~~
-Client                  Server               EVM Chain
-  |                        |                      |
-  | (1) Authorization:     |                      |
-  |     Payment <cred>     |                      |
-  |----------------------->|                      |
-  |                        | (2) Broadcast tx     |
-  |                        |--------------------->|
-  |                        | (3) Confirmation     |
-  |                        |<---------------------|
-  | (4) 200 OK + Receipt   |                      |
-  |<-----------------------|                      |
-~~~
 
 ## Permit2 Settlement
 
@@ -783,42 +642,22 @@ server calls `permitBatchWitnessTransferFrom()`, executing the
 primary transfer and all splits atomically in a single
 transaction.
 
-## Hash Settlement
+## Transaction Settlement
 
 ~~~
 Client                  Server               EVM Chain
   |                        |                      |
-  | (1) Broadcast tx       |                      |
-  |---------------------------------------------->|
-  | (2) Confirmed          |                      |
-  |<----------------------------------------------|
-  |                        |                      |
-  | (3) Authorization:     |                      |
+  | (1) Authorization:     |                      |
   |     Payment <cred>     |                      |
-  |  (tx hash)             |                      |
+  |  (signed transaction)  |                      |
   |----------------------->|                      |
-  |                        | (4) getTransaction-  |
-  |                        |     Receipt          |
+  |                        | (2) Broadcast tx     |
   |                        |--------------------->|
-  |                        | (5) Verify           |
+  |                        | (3) Confirmation     |
   |                        |<---------------------|
-  | (6) 200 OK + Receipt   |                      |
+  | (4) 200 OK + Receipt   |                      |
   |<-----------------------|                      |
 ~~~
-
-## Chain-Specific Optimizations
-
-EVM chains MAY offer RPC extensions that improve settlement
-latency. Servers SHOULD use these when available:
-
-| Chain | Optimization | Benefit |
-|-------|-------------|---------|
-| MegaETH | `eth_sendRawTransactionSync` | Returns receipt inline (no polling) |
-| Any | WebSocket `eth_subscribe` | Push-based confirmation |
-| Any | `eth_call` simulation | Pre-flight validation |
-
-These optimizations are transparent to the client and do not
-affect the credential format or verification procedure.
 
 ## Confirmation Requirements
 
@@ -830,7 +669,7 @@ The time between transaction submission and receipt
 availability varies by chain and current network conditions.
 Servers SHOULD NOT assume a fixed confirmation latency.
 Servers MAY use chain-specific RPC optimizations (e.g.,
-WebSocket subscriptions, `eth_sendRawTransactionSync`) to
+WebSocket subscriptions, synchronous send methods) to
 minimize wait time.
 
 This specification does not prescribe a required confirmation
@@ -866,13 +705,11 @@ The receipt payload:
 Servers MUST maintain a set of consumed credential identifiers.
 The replay prevention token depends on the credential type:
 
-- **`type="transaction"`**: The transaction hash (derived
-  after broadcast) serves as the replay token.
 - **`type="permit2"`**: The combination of signer address
   and Permit2 nonce serves as the replay token. The nonce
   is consumed on-chain by the Permit2 contract.
-- **`type="hash"`**: The transaction hash provided by the
-  client serves as the replay token.
+- **`type="transaction"`**: The transaction hash (derived
+  after broadcast) serves as the replay token.
 
 Before accepting a credential, the server MUST check whether
 its replay token has already been consumed. After successful
@@ -932,42 +769,6 @@ signing:
    is strictly less than `amount` and all split recipients
    are expected
 
-## Hash Credential Binding {#hash-binding}
-
-Hash credentials (`type="hash"`) provide weaker challenge
-binding than transaction or Permit2 credentials. The server
-verifies that a payment matching the challenge terms exists
-on-chain, but cannot prove the payment was created
-specifically for this challenge instance. If multiple valid
-challenges have identical terms, the same transaction could
-satisfy any one of them.
-
-Servers MAY mitigate this by:
-
-- Requiring unique `externalId` values per challenge and
-  verifying them on-chain (e.g., via event data)
-- Preferring `type="transaction"` or `type="permit2"`
-  over `type="hash"` in `credentialTypes`
-- Restricting `type="hash"` to low-value transactions
-
-## Fee Payer Risks
-
-Servers acting as fee payers accept financial risk:
-
-**Denial of Service**: Malicious clients could submit
-credentials that fail on-chain, causing the server to pay
-gas without receiving payment. Mitigations:
-
-- Simulate transactions via `eth_call` before broadcast
-- Rate limit per client address and IP
-- Verify client token balance before signing
-- Require client authentication before accepting
-  fee-sponsored credentials
-
-**Balance Exhaustion**: Servers MUST monitor fee payer
-balance and reject new fee-sponsored requests when
-insufficient.
-
 ## Permit2-Specific Risks
 
 **Allowance Prerequisite**: Permit2 requires a one-time
@@ -982,6 +783,29 @@ If a server fails to submit a Permit2 credential, the nonce
 remains unconsumed and the client can reuse it. Servers MUST
 handle nonce conflicts gracefully.
 
+## Fee Payer Risks
+
+With `type="permit2"`, the server pays gas on every
+settlement. This creates financial risk:
+
+**Denial of Service**: Malicious clients could submit
+credentials that fail on-chain, causing the server to pay
+gas without receiving payment. Mitigations:
+
+- Simulate transactions via `eth_call` before broadcast
+- Rate limit per client address and IP
+- Verify client token balance before submitting
+- Require client authentication before accepting credentials
+
+**Balance Exhaustion**: Servers MUST monitor their native
+token balance and reject new requests when insufficient to
+cover gas.
+
+Gas costs vary significantly across EVM chains. On low-fee
+chains, fee sponsorship is negligible (<$0.001/tx). On
+Ethereum L1, gas costs may be significant and servers SHOULD
+factor this into pricing.
+
 ## Split Payment Risks
 
 **Recipient Transparency**: Clients SHOULD present each
@@ -990,21 +814,17 @@ distribution. Clients SHOULD highlight when the primary
 recipient receives a small remainder relative to the total
 `amount`.
 
-**Batch Failure**: With `type="permit2"` batch transfers,
-splits are atomic — all succeed or all revert. A failure in
-any split causes the entire payment (including the primary
-transfer) to revert. Servers SHOULD simulate the batch via
-`eth_call` before submitting to detect failures early. With
-`type="transaction"`, atomicity depends on whether the client
-used a multicall contract or separate transactions.
+**Batch Failure**: With Permit2 batch transfers, splits are
+atomic — all succeed or all revert. A failure in any split
+causes the entire payment (including the primary transfer)
+to revert. Servers SHOULD simulate the batch via `eth_call`
+before submitting to detect failures early.
 
 ## RPC Trust
 
 Servers rely on their RPC endpoint for transaction data. A
 compromised RPC could return fabricated data. Servers SHOULD
-use trusted RPC providers or run their own nodes. This is
-especially important for hash credential verification where
-the server relies entirely on RPC-provided receipts.
+use trusted RPC providers or run their own nodes.
 
 # IANA Considerations
 
@@ -1033,50 +853,7 @@ This document registers the following payment intent in the
 
 --- back
 
-# Chain-Specific Notes
-
-This appendix documents notable chain-specific behaviors that
-implementers should be aware of. These notes are informational
-and do not change the core specification.
-
-## MegaETH (Chain ID: 4326)
-
-- **Block time**: ~10ms (mini blocks), ~1s (EVM blocks)
-- **Settlement latency**: Sub-50ms end-to-end when using
-  `eth_sendRawTransactionSync`
-- **Intrinsic gas**: 60,000 (vs 21,000 on Ethereum) due
-  to multidimensional gas model. Servers setting gas limits
-  for Permit2 transactions MUST account for this.
-- **Permit2**: Deployed at canonical address
-- **Gas costs**: <$0.001 per tx. Servers SHOULD set
-  `feePayer: true` by default.
-- **`SELFDESTRUCT`**: Disabled. Contracts relying on this
-  opcode will fail.
-
-## Sei (Chain ID: 1329)
-
-- **Block time**: ~400ms
-- **Gas costs**: Low. Servers SHOULD consider `feePayer: true`.
-- **EVM compatibility**: Full ERC-20 and EIP-1559 support
-- **Permit2**: Deployed at canonical address
-
-## Ethereum L1 (Chain ID: 1)
-
-- **Block time**: ~12s
-- **Gas costs**: Variable, potentially high. Fee sponsorship
-  may not be economical; servers MAY set `feePayer: false`.
-- **Confirmation**: Servers SHOULD require more confirmations
-  for high-value transactions due to reorg risk.
-
-## L2 Rollups (Optimism, Base, Arbitrum)
-
-- **Block time**: 250ms-2s depending on chain
-- **Gas costs**: Low to moderate
-- **Finality**: Soft finality is fast; full L1 finality
-  takes longer. For most payment use cases, soft finality
-  is sufficient.
-
-# Full Example: ERC-20 Charge with Permit2
+# Full Example: Permit2 Charge on MegaETH
 
 **1. Challenge (402 response):**
 
@@ -1089,9 +866,9 @@ WWW-Authenticate: Payment id="aB3cDeF4gHiJkLmN",
   request="eyJhbW91bnQiOiIxMDAwMDAwMDAwMDAwMDAwMDAwIiwiY3
     VycmVuY3kiOiIweEZBZkRkYmIzRkM3Njg4NDk0OTcxYTc5Y2M2NU
     RDYTNFRjgyMDc5RTciLCJtZXRob2REZXRhaWxzIjp7ImNoYWluSWQ
-    iOjQzMjYsImZlZVBheWVyIjp0cnVlfSwicmVjaXBpZW50IjoiMHg3
-    NDJkMzVDYzY2MzRDMDUzMjkyNWEzYjg0NEJjOWU3NTk1ZjhmRTAwI
-    n0",
+    iOjQzMjYsImNyZWRlbnRpYWxUeXBlcyI6WyJwZXJtaXQyIl19LCJ
+    yZWNpcGllbnQiOiIweDc0MmQzNUNjNjYzNEMwNTMyOTI1YTNiODQ0
+    QmM5ZTc1OTVmOGZFMDAifQ",
   expires="2026-04-01T12:05:00Z"
 Cache-Control: no-store
 ~~~
@@ -1105,39 +882,63 @@ Decoded `request`:
   "recipient": "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00",
   "methodDetails": {
     "chainId": 4326,
-    "feePayer": true
+    "credentialTypes": ["permit2"]
   }
 }
 ~~~
 
-This requests 1.0 USDm (10^18 base units) on MegaETH with
-server-paid gas.
+This requests 1.0 USDm (10^18 base units) on MegaETH
+(chain 4326).
 
 **2. Credential (Permit2 authorization):**
 
 ~~~http
 GET /api/resource HTTP/1.1
 Host: api.example.com
-Authorization: Payment eyJjaGFsbGVuZ2UiOnsiaWQiOiJhQjNjRGVG
-  NGdIaUprTG1OIn0sInBheWxvYWQiOnsidHlwZSI6InBlcm1pdDIiLCJw
-  ZXJtaXQiOnsicGVybWl0dGVkIjp7InRva2VuIjoiMHhGQWZEZGJiM0ZD
-  NzY4ODQ5NDk3MWE3OWNjNjVEQ2EzRUY4MjA3OUU3IiwiYW1vdW50Ijoi
-  MTAwMDAwMDAwMDAwMDAwMDAwMCJ9LCJub25jZSI6IjEiLCJkZWFkbGlu
-  ZSI6IjE3NDM1MjM1MDAifSwid2l0bmVzcyI6eyJ0cmFuc2ZlckRldGFp
-  bHMiOnsidG8iOiIweDc0MmQzNUNjNjYzNEMwNTMyOTI1YTNiODQ0QmM5
-  ZTc1OTVmOGZFMDAiLCJyZXF1ZXN0ZWRBbW91bnQiOiIxMDAwMDAwMDAw
-  MDAwMDAwMDAwIn19LCJzaWduYXR1cmUiOiIweDFiMmMzZDRlNWYuLi4i
-  fX0
+Authorization: Payment <base64url-encoded credential>
+~~~
+
+Decoded credential:
+
+~~~json
+{
+  "challenge": {
+    "id": "aB3cDeF4gHiJkLmN",
+    "realm": "api.example.com",
+    "method": "evm",
+    "intent": "charge",
+    "request": "eyJ...",
+    "expires": "2026-04-01T12:05:00Z"
+  },
+  "payload": {
+    "type": "permit2",
+    "permit": {
+      "permitted": [
+        {
+          "token": "0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7",
+          "amount": "1000000000000000000"
+        }
+      ],
+      "nonce": "1",
+      "deadline": "1743523500"
+    },
+    "transferDetails": [
+      {
+        "to": "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00",
+        "requestedAmount": "1000000000000000000"
+      }
+    ],
+    "signature": "0x1b2c3d4e5f..."
+  },
+  "source": "did:pkh:eip155:4326:0x1234...5678"
+}
 ~~~
 
 **3. Response (with receipt):**
 
 ~~~http
 HTTP/1.1 200 OK
-Payment-Receipt: eyJtZXRob2QiOiJldm0iLCJjaGFsbGVuZ2VJZCI6Im
-  FCM2NEZUY0Z0hpSmtMbU4iLCJyZWZlcmVuY2UiOiIweGFiYzEyMy4u
-  LiIsInN0YXR1cyI6InN1Y2Nlc3MiLCJ0aW1lc3RhbXAiOiIyMDI2LTA
-  0LTAxVDEyOjA0OjU4WiIsImNoYWluSWQiOjQzMjZ9
+Payment-Receipt: <base64url-encoded receipt>
 Content-Type: application/json
 
 {"response": "resource data"}
@@ -1156,9 +957,9 @@ Decoded receipt:
 }
 ~~~
 
-# Full Example: ERC-20 Charge with Signed Transaction
+# Full Example: Transaction Charge on Sei
 
-**Challenge** requests 1.0 USDC on Sei:
+**Challenge** requests 1.0 USDC on Sei (chain 1329):
 
 ~~~json
 {
