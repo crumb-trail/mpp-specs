@@ -813,7 +813,7 @@ latency. Servers SHOULD use these when available:
 
 | Chain | Optimization | Benefit |
 |-------|-------------|---------|
-| MegaETH | `realtime_sendRawTransaction` | Returns receipt inline (no polling) |
+| MegaETH | `eth_sendRawTransactionSync` | Returns receipt inline (no polling) |
 | Any | WebSocket `eth_subscribe` | Push-based confirmation |
 | Any | `eth_call` simulation | Pre-flight validation |
 
@@ -830,7 +830,7 @@ The time between transaction submission and receipt
 availability varies by chain and current network conditions.
 Servers SHOULD NOT assume a fixed confirmation latency.
 Servers MAY use chain-specific RPC optimizations (e.g.,
-WebSocket subscriptions, `realtime_sendRawTransaction`) to
+WebSocket subscriptions, `eth_sendRawTransactionSync`) to
 minimize wait time.
 
 This specification does not prescribe a required confirmation
@@ -1043,7 +1043,7 @@ and do not change the core specification.
 
 - **Block time**: ~10ms (mini blocks), ~1s (EVM blocks)
 - **Settlement latency**: Sub-50ms end-to-end when using
-  `realtime_sendRawTransaction`
+  `eth_sendRawTransactionSync`
 - **Intrinsic gas**: 60,000 (vs 21,000 on Ethereum) due
   to multidimensional gas model. Servers setting gas limits
   for Permit2 transactions MUST account for this.
