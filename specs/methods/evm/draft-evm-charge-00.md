@@ -323,15 +323,14 @@ Split atomicity depends on the credential type:
   transfers succeed or fail atomically. When executed as
   separate transactions, atomicity is not guaranteed.
 
-- **`type="permit2"`**: Each split requires a separate
-  `permitWitnessTransferFrom()` call. These are NOT atomic.
-  Servers MUST execute the primary transfer before splits.
-  If a split fails after the primary succeeds, servers MUST
-  still return a receipt for the primary transfer and SHOULD
-  log the partial failure.
+- **`type="permit2"`**: Splits are atomic. The client signs a
+  single `PermitBatchTransferFrom` message covering the primary
+  transfer and all splits. The server submits one
+  `permitBatchWitnessTransferFrom()` call — all transfers
+  succeed or fail as a single on-chain transaction.
 
-Servers MAY mitigate partial execution risk by simulating all
-transfers via `eth_call` before submitting any on-chain.
+Servers SHOULD simulate the batch via `eth_call` before
+submitting on-chain.
 
 # Credential Schema
 
@@ -399,20 +398,31 @@ atomicity.
 
 ## Permit2 Payload (type="permit2") {#permit2-payload}
 
-The client signs an off-chain EIP-712 Permit2
-`PermitWitnessTransferFrom` message. The server constructs and
-submits the on-chain transaction. This type requires that the
-Permit2 contract is deployed on the target chain and that the
-client has an active ERC-20 approval to the Permit2 contract.
+The client signs an off-chain EIP-712 Permit2 authorization
+message. The server constructs and submits the on-chain
+transaction. This type requires that the Permit2 contract is
+deployed on the target chain and that the client has an active
+ERC-20 approval to the Permit2 contract.
+
+Permit2 supports two transfer modes:
+
+- **Single transfer** (`PermitTransferFrom`): Used when no
+  splits are present. One signature, one transfer.
+- **Batch transfer** (`PermitBatchTransferFrom`): Used when
+  splits are present. One signature covers the primary
+  transfer and all splits atomically.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `type` | string | REQUIRED | `"permit2"` |
 | `permit` | object | REQUIRED | Permit2 permit data |
-| `witness` | object | REQUIRED | Transfer witness data |
+| `transferDetails` | array | REQUIRED | Array of transfer details |
 | `signature` | string | REQUIRED | EIP-712 signature (`0x`-prefixed) |
 
-The `permit` object:
+### Single Transfer (No Splits)
+
+When no splits are present, the `permit` object describes a
+single token permission:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -420,28 +430,48 @@ The `permit` object:
 | `nonce` | string | Permit2 nonce (stringified integer) |
 | `deadline` | string | Unix timestamp (stringified integer) |
 
-The `witness` object:
+The `transferDetails` array MUST contain exactly one entry:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `transferDetails` | object | `{ to, requestedAmount }` — recipient and exact amount |
+| `to` | string | Recipient address |
+| `requestedAmount` | string | Exact transfer amount in base units |
+
+The server calls `permitWitnessTransferFrom()` with these
+parameters.
+
+### Batch Transfer (With Splits) {#batch-transfer}
+
+When splits are present, the `permit` object describes
+multiple token permissions — one for the primary transfer and
+one for each split:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `permitted` | array | Array of `{ token, amount }` objects. Length MUST equal 1 + number of splits. All `token` values MUST be the `currency` address. |
+| `nonce` | string | Permit2 nonce (stringified integer) |
+| `deadline` | string | Unix timestamp (stringified integer) |
+
+The `transferDetails` array MUST have the same length as
+`permitted`. Each entry specifies:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `to` | string | Recipient address |
+| `requestedAmount` | string | Exact transfer amount in base units |
+
+The first entry corresponds to the primary recipient. Subsequent
+entries correspond to split recipients in array order.
+
+The server calls `permitBatchWitnessTransferFrom()` with these
+parameters. This executes all transfers in a single on-chain
+transaction — if any transfer fails, the entire batch reverts.
 
 **Prerequisite:** The client MUST have an active ERC-20
 approval from the `currency` token to the Permit2 contract.
 This is a one-time operation per token per chain.
 
-When `splits` are present, the client MUST provide separate
-Permit2 signatures for each split. The `payload` is extended
-with a `splitSignatures` array:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `splitSignatures` | array | Conditionally REQUIRED | Array of `{ permit, witness, signature }` objects, one per split entry |
-
-Each entry in `splitSignatures` follows the same schema as the
-top-level `permit`, `witness`, and `signature` fields.
-
-**Example:**
+### Example: Single Transfer
 
 ~~~json
 {
@@ -463,17 +493,65 @@ top-level `permit`, `witness`, and `signature` fields.
       "nonce": "1",
       "deadline": "1743523500"
     },
-    "witness": {
-      "transferDetails": {
+    "transferDetails": [
+      {
         "to": "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00",
         "requestedAmount": "1000000000000000000"
       }
-    },
+    ],
     "signature": "0x1b2c3d4e5f..."
   },
   "source": "did:pkh:eip155:4326:0x1234...5678"
 }
 ~~~
+
+### Example: Batch Transfer with Splits
+
+~~~json
+{
+  "challenge": {
+    "id": "sP1itBatchEx4mple",
+    "realm": "marketplace.example.com",
+    "method": "evm",
+    "intent": "charge",
+    "request": "eyJ...",
+    "expires": "2026-04-01T12:05:00Z"
+  },
+  "payload": {
+    "type": "permit2",
+    "permit": {
+      "permitted": [
+        {
+          "token": "0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7",
+          "amount": "1000000000000000000"
+        },
+        {
+          "token": "0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7",
+          "amount": "50000000000000000"
+        }
+      ],
+      "nonce": "1",
+      "deadline": "1743523500"
+    },
+    "transferDetails": [
+      {
+        "to": "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00",
+        "requestedAmount": "1000000000000000000"
+      },
+      {
+        "to": "0x8Ba1f109551bD432803012645Ac136ddd64DBA72",
+        "requestedAmount": "50000000000000000"
+      }
+    ],
+    "signature": "0x9a8b7c6d5e..."
+  },
+  "source": "did:pkh:eip155:4326:0x1234...5678"
+}
+~~~
+
+This example transfers 1.0 USDm to the primary recipient and
+0.05 USDm to the platform — atomically, in a single tx.
+The client signs one EIP-712 message covering both transfers.
 
 ## Hash Payload (type="hash") {#hash-payload}
 
@@ -608,19 +686,38 @@ Before submitting, servers MUST verify:
 
 1. The EIP-712 signature is valid and recovers to the
    `source` address
-2. The `permitted.token` matches `currency`
-3. The `permitted.amount` is sufficient for the transfer
-4. The `witness.transferDetails.to` matches `recipient`
-5. The `witness.transferDetails.requestedAmount` matches
-   `amount` (minus sum of splits, if primary transfer)
-6. The `deadline` has not passed
-7. The signer has sufficient token balance
-8. The signer has sufficient Permit2 allowance
-9. If `splits` are present, verify each entry in
-   `splitSignatures` with the same checks
-10. Call `Permit2.permitWitnessTransferFrom()` for the
-    primary transfer, then for each split in order
-11. Verify transaction receipt(s) indicate success
+2. The `deadline` has not passed
+3. The signer has sufficient token balance for the total
+   amount (primary + all splits)
+4. The signer has sufficient Permit2 allowance
+
+For **single transfers** (no splits):
+
+5. `permitted.token` matches `currency`
+6. `permitted.amount` is sufficient for the transfer
+7. `transferDetails[0].to` matches `recipient`
+8. `transferDetails[0].requestedAmount` matches `amount`
+9. Call `Permit2.permitWitnessTransferFrom()`
+
+For **batch transfers** (with splits):
+
+5. Each `permitted[i].token` matches `currency`
+6. `permitted` and `transferDetails` arrays have equal
+   length, equal to 1 + number of splits
+7. `transferDetails[0].to` matches the primary `recipient`
+8. `transferDetails[0].requestedAmount` matches
+   `amount - sum(splits[].amount)`
+9. For each split at index i, `transferDetails[i+1].to`
+   matches `splits[i].recipient` and
+   `transferDetails[i+1].requestedAmount` matches
+   `splits[i].amount`
+10. Call `Permit2.permitBatchWitnessTransferFrom()`
+
+For both modes:
+
+11. Verify the transaction receipt indicates success
+12. Verify `Transfer` event logs match all expected
+    transfers
 
 ## Hash Verification {#hash-verification}
 
@@ -668,15 +765,23 @@ Client                  Server               EVM Chain
   |  (Permit2 signature)   |                      |
   |----------------------->|                      |
   |                        | (2) Verify sig       |
-  |                        | (3) Submit           |
-  |                        |  permitWitness-      |
+  |                        | (3) Submit permit-   |
+  |                        |  [Batch]Witness-     |
   |                        |  TransferFrom()      |
   |                        |--------------------->|
   |                        | (4) Receipt          |
+  |                        |  (all transfers      |
+  |                        |   atomic in 1 tx)    |
   |                        |<---------------------|
   | (5) 200 OK + Receipt   |                      |
   |<-----------------------|                      |
 ~~~
+
+For single transfers, the server calls
+`permitWitnessTransferFrom()`. When splits are present, the
+server calls `permitBatchWitnessTransferFrom()`, executing the
+primary transfer and all splits atomically in a single
+transaction.
 
 ## Hash Settlement
 
@@ -879,10 +984,13 @@ distribution. Clients SHOULD highlight when the primary
 recipient receives a small remainder relative to the total
 `amount`.
 
-**Partial Execution**: When splits are non-atomic (Permit2
-credentials), a split may fail after the primary transfer
-succeeds. Servers MUST handle partial execution gracefully
-and SHOULD simulate all transfers before submitting.
+**Batch Failure**: With `type="permit2"` batch transfers,
+splits are atomic — all succeed or all revert. A failure in
+any split causes the entire payment (including the primary
+transfer) to revert. Servers SHOULD simulate the batch via
+`eth_call` before submitting to detect failures early. With
+`type="transaction"`, atomicity depends on whether the client
+used a multicall contract or separate transactions.
 
 ## RPC Trust
 
