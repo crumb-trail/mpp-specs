@@ -134,6 +134,7 @@ This specification defines two credential types:
   - The server naturally sponsors gas (fee payer)
   - Split payments are atomic via batch transfers
   - No nonce management burden on the client
+  - `externalId` is cryptographically bound via witness data
 
 - **`type="transaction"`**: The client signs a complete ERC-20
   `transfer` transaction. The server broadcasts it. This is the
@@ -372,6 +373,7 @@ token per chain).
 | `type` | string | REQUIRED | `"permit2"` |
 | `permit` | object | REQUIRED | Permit2 permit data |
 | `transferDetails` | array | REQUIRED | Array of transfer details |
+| `witness` | object | REQUIRED | Challenge binding witness data |
 | `signature` | string | REQUIRED | EIP-712 signature (`0x`-prefixed) |
 
 ### Permit Object
@@ -405,6 +407,45 @@ The `transferDetails` array MUST have the same length as
 The first entry corresponds to the primary recipient.
 Subsequent entries (if any) correspond to split recipients
 in array order.
+
+### Witness Data (Challenge Binding) {#witness-data}
+
+The Permit2 witness mechanism provides cryptographic
+binding between the payment authorization and the
+challenge. When `externalId` is present in the challenge
+request, the client MUST include it in the EIP-712
+witness struct. The server MUST verify the witness
+matches before submitting the transaction.
+
+The witness type is defined as:
+
+~~~solidity
+struct PaymentWitness {
+    bytes32 challengeHash;
+}
+~~~
+
+Where `challengeHash` is computed as:
+
+~~~
+challengeHash = keccak256(abi.encodePacked(
+    challenge.id,
+    challenge.realm
+))
+~~~
+
+This binds the Permit2 signature to the specific
+challenge instance. The signature cannot be reused
+against a different challenge, even if the payment
+parameters are identical.
+
+The witness type string for EIP-712 is:
+`"PaymentWitness witness)PaymentWitness(bytes32 challengeHash)TokenPermissions(address token,uint256 amount)"`
+
+This binding applies to both single and batch
+transfers — the same `witness` parameter is used by
+`permitWitnessTransferFrom()` and
+`permitBatchWitnessTransferFrom()`.
 
 ### Server Behavior
 
@@ -451,6 +492,9 @@ all chain interaction.
         "requestedAmount": "1000000000000000000"
       }
     ],
+    "witness": {
+      "challengeHash": "0x8a3b...f1c2"
+    },
     "signature": "0x1b2c3d4e5f..."
   },
   "source": "did:pkh:eip155:4326:0x1234...5678"
@@ -495,6 +539,9 @@ all chain interaction.
         "requestedAmount": "50000000000000000"
       }
     ],
+    "witness": {
+      "challengeHash": "0x7d4e...a3b9"
+    },
     "signature": "0x9a8b7c6d5e..."
   },
   "source": "did:pkh:eip155:4326:0x1234...5678"
@@ -622,25 +669,27 @@ Before submitting, servers MUST verify:
 3. The signer has sufficient token balance for the total
    amount (primary + all splits)
 4. The signer has sufficient Permit2 allowance
-5. `permitted` and `transferDetails` arrays have equal length
-6. Each `permitted[i].token` matches `currency`
-7. `transferDetails[0].to` matches `recipient`
-8. `transferDetails[0].requestedAmount` matches the primary
+5. The `witness.challengeHash` matches the expected
+   value derived from the challenge `id` and `realm`
+6. `permitted` and `transferDetails` arrays have equal length
+7. Each `permitted[i].token` matches `currency`
+8. `transferDetails[0].to` matches `recipient`
+9. `transferDetails[0].requestedAmount` matches the primary
    transfer amount (`amount` minus sum of splits, or `amount`
    if no splits)
-9. For each split at index i (if present),
+10. For each split at index i (if present),
    `transferDetails[i+1].to` matches `splits[i].recipient`
    and `transferDetails[i+1].requestedAmount` matches
    `splits[i].amount`
 
 After verification:
 
-10. For single transfers (`permitted` length 1): call
+11. For single transfers (`permitted` length 1): call
     `Permit2.permitWitnessTransferFrom()`
-11. For batch transfers (`permitted` length > 1): call
+12. For batch transfers (`permitted` length > 1): call
     `Permit2.permitBatchWitnessTransferFrom()`
-12. Verify the transaction receipt indicates success
-13. Verify `Transfer` event logs match all expected transfers
+13. Verify the transaction receipt indicates success
+14. Verify `Transfer` event logs match all expected transfers
 
 Servers SHOULD simulate the transaction via `eth_call` before
 submitting to detect failures without spending gas.
@@ -867,13 +916,19 @@ signing:
 
 ## Hash Credential Binding {#hash-binding}
 
-Hash credentials (`type="hash"`) provide weaker challenge
-binding than Permit2 or transaction credentials. The server
-verifies that a payment matching the challenge terms exists
-on-chain, but cannot prove the payment was created
-specifically for this challenge instance. If multiple valid
-challenges have identical terms, the same transaction could
-satisfy any one of them.
+Hash credentials (`type="hash"`) and transaction credentials
+(`type="transaction"`) provide weaker challenge binding
+than Permit2 credentials. The server verifies that a payment
+matching the challenge terms exists on-chain, but cannot
+prove the payment was created for a specific challenge
+instance.
+
+By contrast, `type="permit2"` credentials include a
+`challengeHash` in the EIP-712 witness data, cryptographically
+binding the signature to the specific challenge `id` and
+`realm`. This prevents signature reuse across challenges,
+even if payment parameters are identical. This is a key
+reason `type="permit2"` is the RECOMMENDED credential type.
 
 Servers MAY mitigate this by:
 
@@ -1040,6 +1095,9 @@ Decoded credential:
         "requestedAmount": "1000000000000000000"
       }
     ],
+    "witness": {
+      "challengeHash": "0x8a3b...f1c2"
+    },
     "signature": "0x1b2c3d4e5f..."
   },
   "source": "did:pkh:eip155:4326:0x1234...5678"
