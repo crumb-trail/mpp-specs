@@ -68,11 +68,14 @@ method in the Payment HTTP Authentication Scheme
 exchange one-time ERC-20 token transfers on any EVM-compatible
 blockchain.
 
-Two credential types are supported: `type="permit2"`
+Three credential types are supported: `type="permit2"`
 (RECOMMENDED), where the client signs an off-chain Permit2
-authorization and the server submits the transfer; and
+authorization and the server submits the transfer;
 `type="transaction"`, where the client signs and the server
-broadcasts a standard ERC-20 transfer transaction.
+broadcasts a standard ERC-20 transfer transaction; and
+`type="hash"` (optional fallback), where the client
+broadcasts the transaction itself and presents the on-chain
+transaction hash for server verification.
 
 This specification covers ERC-20 token transfers only. Native
 token transfers (ETH, etc.) are out of scope.
@@ -108,18 +111,15 @@ differences are chain ID and optional RPC extensions. A unified
 `evm` method avoids fragmenting the registry while still allowing
 chain-specific optimizations at the implementation level.
 
-## Client-Broadcast Exclusion
+## Client-Broadcast Fallback
 
-Some payment methods (Solana, Tempo) support a fallback
-where the client broadcasts the transaction itself and
-presents the on-chain hash or signature to the server.
-This specification intentionally excludes that pattern.
-Client-broadcast credentials provide weaker challenge
-binding — the server cannot prove the payment was created
-for a specific challenge instance — and complicate fee
-sponsorship. Both credential types defined here keep the
-server in control of broadcast, which is simpler and more
-secure.
+Some clients (custodial wallets, hardware signers) cannot
+hand off a signed-but-unbroadcast transaction. For these
+cases, `type="hash"` allows the client to broadcast the
+transaction itself and present the on-chain hash. This
+mode provides weaker challenge binding and does not support
+splits or server-paid fees. Servers SHOULD prefer
+`type="permit2"` or `type="transaction"` when possible.
 
 ## Credential Types
 
@@ -264,12 +264,13 @@ any particular set of chains.
 Servers MAY indicate accepted credential types via the
 `credentialTypes` field in `methodDetails`:
 
-Valid values: `"permit2"`, `"transaction"`.
+Valid values: `"permit2"`, `"transaction"`, `"hash"`.
 
-If omitted, servers MUST accept `"transaction"`. Servers that
-support Permit2 SHOULD include `"permit2"` as the first entry
-to indicate preference. Clients SHOULD use the first type in
-the list that they support.
+If omitted, servers MUST accept `"transaction"` and SHOULD
+accept `"hash"`. Servers that support Permit2 SHOULD include
+`"permit2"` as the first entry to indicate preference.
+Clients SHOULD use the first type in the list that they
+support.
 
 ### Payment Splits {#split-payments}
 
@@ -551,22 +552,65 @@ includes `splits`.
 }
 ~~~
 
+
+## Hash Payload (type="hash") {#hash-payload}
+
+Optional fallback for clients that broadcast transactions
+themselves (e.g., custodial wallets, hardware signers). The
+client broadcasts a standard ERC-20 `transfer` transaction
+to the chain and presents the confirmed transaction hash.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | REQUIRED | `"hash"` |
+| `hash` | string | REQUIRED | Transaction hash (`0x`-prefixed, 32 bytes hex) |
+
+Constraints:
+
+- Splits are NOT supported. Servers MUST reject `type="hash"`
+  credentials when the challenge includes `splits`.
+- The client pays gas.
+- The server cannot modify or retry the transaction.
+- Weaker challenge binding than other types (see
+  {{hash-binding}}).
+
+**Example:**
+
+~~~json
+{
+  "challenge": {
+    "id": "kM9xPqWvT2nJrHsY4aDfEb",
+    "realm": "api.example.com",
+    "method": "evm",
+    "intent": "charge",
+    "request": "eyJ...",
+    "expires": "2026-04-01T12:05:00Z"
+  },
+  "payload": {
+    "hash": "0x1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890",
+    "type": "hash"
+  },
+  "source": "did:pkh:eip155:4326:0x1234567890abcdef1234567890abcdef12345678"
+}
+~~~
+
 # Verification Procedure {#verification}
 
 Upon receiving a request with a credential, the server MUST:
 
 1. Decode the base64url credential and parse the JSON.
 2. Verify that `payload.type` is present and is one of
-   `"permit2"` or `"transaction"`.
+   `"permit2"`, `"transaction"`, or `"hash"`.
 3. Look up the stored challenge using `credential.challenge.id`.
    If no matching challenge is found, reject the request.
 4. Verify that all fields in `credential.challenge` exactly
    match the stored challenge auth-params.
 5. If the challenge includes `splits` and `payload.type` is
-   `"transaction"`, reject the request.
+   not `"permit2"`, reject the request.
 6. Proceed with type-specific verification:
    - For `type="permit2"`: see {{permit2-verification}}.
    - For `type="transaction"`: see {{transaction-verification}}.
+   - For `type="hash"`: see {{hash-verification}}.
 
 ## Permit2 Verification {#permit2-verification}
 
@@ -622,6 +666,23 @@ Before broadcasting, servers MUST verify:
 9. Verify the receipt contains a `Transfer` event log
    matching the challenge parameters
 
+
+## Hash Verification {#hash-verification}
+
+For hash credentials, servers MUST:
+
+1. Verify `payload.hash` has not been previously consumed
+   (see {{replay-protection}})
+2. Fetch the transaction receipt via
+   `eth_getTransactionReceipt`
+3. Verify `status` is `0x1` (success)
+4. Verify the receipt contains a `Transfer` event log
+   (topic `0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef`):
+   - Log `address` matches `currency`
+   - `to` parameter matches `recipient`
+   - `value` parameter matches `amount`
+5. Mark the hash as consumed
+
 # Settlement Procedure
 
 ## Permit2 Settlement
@@ -666,6 +727,29 @@ Client                  Server               EVM Chain
   |                        | (3) Confirmation     |
   |                        |<---------------------|
   | (4) 200 OK + Receipt   |                      |
+  |<-----------------------|                      |
+~~~
+
+## Hash Settlement
+
+~~~
+Client                  Server               EVM Chain
+  |                        |                      |
+  | (1) Broadcast tx       |                      |
+  |---------------------------------------------->|
+  | (2) Confirmed          |                      |
+  |<----------------------------------------------|
+  |                        |                      |
+  | (3) Authorization:     |                      |
+  |     Payment <cred>     |                      |
+  |  (tx hash)             |                      |
+  |----------------------->|                      |
+  |                        | (4) getTransaction-  |
+  |                        |     Receipt          |
+  |                        |--------------------->|
+  |                        | (5) Verify           |
+  |                        |<---------------------|
+  | (6) 200 OK + Receipt   |                      |
   |<-----------------------|                      |
 ~~~
 
@@ -720,6 +804,8 @@ The replay prevention token depends on the credential type:
   is consumed on-chain by the Permit2 contract.
 - **`type="transaction"`**: The transaction hash (derived
   after broadcast) serves as the replay token.
+- **`type="hash"`**: The transaction hash provided by the
+  client serves as the replay token.
 
 Before accepting a credential, the server MUST check whether
 its replay token has already been consumed. After successful
@@ -778,6 +864,23 @@ signing:
 5. If `splits` are present, verify the sum of split amounts
    is strictly less than `amount` and all split recipients
    are expected
+
+## Hash Credential Binding {#hash-binding}
+
+Hash credentials (`type="hash"`) provide weaker challenge
+binding than Permit2 or transaction credentials. The server
+verifies that a payment matching the challenge terms exists
+on-chain, but cannot prove the payment was created
+specifically for this challenge instance. If multiple valid
+challenges have identical terms, the same transaction could
+satisfy any one of them.
+
+Servers MAY mitigate this by:
+
+- Requiring unique `externalId` values per challenge
+- Preferring `type="permit2"` or `type="transaction"` in
+  `credentialTypes`
+- Restricting `type="hash"` to low-value transactions
 
 ## Permit2-Specific Risks
 
