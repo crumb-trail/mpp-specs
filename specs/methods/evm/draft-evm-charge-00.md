@@ -13,10 +13,6 @@ author:
     ins: B. DiNovi
     email: bread@megaeth.com
     organization: MegaETH Labs
-  - name: Kartik Bhat
-    ins: K. Bhat
-    email: kartik@seinetwork.io
-    organization: Sei Labs
 
 normative:
   RFC2119:
@@ -838,8 +834,7 @@ This document registers the following payment method in the
 |-------------------|-------------|-----------|
 | `evm` | EVM-compatible blockchain ERC-20 token transfer | This document |
 
-Contact: Brett DiNovi (<bread@megaeth.com>),
-Kartik Bhat (<kartik@seinetwork.io>)
+Contact: Brett DiNovi (<bread@megaeth.com>)
 
 ## Payment Intent Registration
 
