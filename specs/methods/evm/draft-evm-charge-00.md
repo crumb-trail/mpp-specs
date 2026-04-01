@@ -108,6 +108,19 @@ differences are chain ID and optional RPC extensions. A unified
 `evm` method avoids fragmenting the registry while still allowing
 chain-specific optimizations at the implementation level.
 
+## Client-Broadcast Exclusion
+
+Some payment methods (Solana, Tempo) support a fallback
+where the client broadcasts the transaction itself and
+presents the on-chain hash or signature to the server.
+This specification intentionally excludes that pattern.
+Client-broadcast credentials provide weaker challenge
+binding — the server cannot prove the payment was created
+for a specific challenge instance — and complicate fee
+sponsorship. Both credential types defined here keep the
+server in control of broadcast, which is simpler and more
+secure.
+
 ## Credential Types
 
 This specification defines two credential types:
@@ -232,6 +245,7 @@ mixed-case encoding but MUST compare addresses by decoded
 | `chainId` | number | REQUIRED | EIP-155 chain ID |
 | `permit2Address` | string | OPTIONAL | Permit2 contract address (default: canonical address) |
 | `credentialTypes` | array | OPTIONAL | Ordered list of accepted credential types |
+| `decimals` | number | OPTIONAL | Token decimal precision (e.g., 6 for USDC, 18 for USDm). Aids client-side display verification. |
 | `splits` | array | OPTIONAL | Additional payment splits (max 10) |
 
 ### Chain Identification
